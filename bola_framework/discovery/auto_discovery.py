@@ -229,10 +229,26 @@ class AutoDiscoverer(Discoverer):
                 form_fields=fields,
             )
 
-    # String-literal path references inside JS source, e.g. fetch("/rest/x")
-    # or axios.get(`/api/y/${id}`). Heuristic only -- does not execute JS, so
-    # paths built up piecemeal via string concatenation are still invisible.
+    # String-literal path references inside JS source, e.g. fetch("/rest/x").
     _JS_PATH_LITERAL_RE = re.compile(r"""["'`](/[a-zA-Z0-9/_\-{}.]+)["'`]""")
+
+    # Template-literal paths with interpolation, e.g. `/rest/basket/${id}` or
+    # `/api/users/${userId}/profile`. This is the dominant way modern SPA
+    # frameworks (Angular, React, Vue) build per-object API URLs, and it is
+    # exactly the shape of the endpoints that matter most for BOLA testing --
+    # the plain literal regex above cannot match these at all because of the
+    # `$` and expression characters inside `${...}`. Each `${...}` segment is
+    # replaced with a numeric sentinel so the normal path-templatizing logic
+    # downstream turns it into a proper {paramN} placeholder.
+    _JS_TEMPLATE_LITERAL_RE = re.compile(r"`(/[^`]*?\$\{[^`]*?)`")
+    _TEMPLATE_INTERPOLATION_RE = re.compile(r"\$\{[^}]*\}")
+
+    # Simple string concatenation, e.g. '/rest/basket/' + id or
+    # "/api/users/" + userId + "/profile". Covers older/non-template-literal
+    # JS that still builds per-object URLs dynamically.
+    _JS_CONCAT_PREFIX_RE = re.compile(
+        r"""["'](/[a-zA-Z0-9/_\-]*/)["']\s*\+\s*[a-zA-Z_$][\w$]*"""
+    )
 
     def _extract_js_references(self, soup: BeautifulSoup, base: str) -> None:
         """Scan both inline <script> blocks and same-origin external JS bundles
@@ -285,15 +301,36 @@ class AutoDiscoverer(Discoverer):
         self, text: str, base: str, signal: str = "inline-js-reference"
     ) -> None:
         confidence = 0.3 if signal == "inline-js-reference" else 0.35
+
         for match in set(self._JS_PATH_LITERAL_RE.findall(text)):
             if self._looks_like_api_path(match):
                 absolute = urljoin(base, match)
+                self._add_candidate("GET", absolute, confidence=confidence, signals=[signal])
+
+        # Template-literal paths carry a stronger signal than plain literals:
+        # interpolation is itself evidence the path addresses a specific
+        # object, which is exactly what BOLA testing needs.
+        template_confidence = min(1.0, confidence + 0.15)
+        for match in set(self._JS_TEMPLATE_LITERAL_RE.findall(text)):
+            normalized = self._TEMPLATE_INTERPOLATION_RE.sub("1", match)
+            if self._looks_like_api_path(normalized) or "1" in normalized:
+                absolute = urljoin(base, normalized)
                 self._add_candidate(
                     "GET",
                     absolute,
-                    confidence=confidence,
-                    signals=[signal],
+                    confidence=template_confidence,
+                    signals=[f"{signal}-template-literal"],
                 )
+
+        for prefix in set(self._JS_CONCAT_PREFIX_RE.findall(text)):
+            normalized = prefix + "1"
+            absolute = urljoin(base, normalized)
+            self._add_candidate(
+                "GET",
+                absolute,
+                confidence=template_confidence,
+                signals=[f"{signal}-string-concat"],
+            )
 
     def _classify_json_response(self, url: str, resp: requests.Response) -> None:
         try:

@@ -34,7 +34,12 @@ from urllib.parse import urljoin
 from bola_framework.auth.session_manager import AuthScheme, LoginSpec, Principal
 from bola_framework.config import DiscoveryConfig, ScanConfig, load_scan_config
 from bola_framework.models.finding import BolaClassification
-from bola_framework.reporting import write_json_report, write_markdown_report
+from bola_framework.reporting import (
+    print_findings_table,
+    print_report_paths,
+    write_json_report,
+    write_markdown_report,
+)
 from bola_framework.scanner import Scanner
 
 _DEFAULT_DISCOVERY_SOURCE_PATH = {
@@ -250,7 +255,9 @@ def main(argv: list[str] | None = None) -> int:
 
     write_json_report(findings, config.output_json)
     write_markdown_report(findings, config.output_markdown)
-    logger.info("Reports written to %s and %s", config.output_json, config.output_markdown)
+
+    print_findings_table(findings)
+    print_report_paths(config.output_json, config.output_markdown)
 
     return 1 if confirmed else 0
 
