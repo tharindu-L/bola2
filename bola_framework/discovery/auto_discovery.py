@@ -237,10 +237,15 @@ class AutoDiscoverer(Discoverer):
     # frameworks (Angular, React, Vue) build per-object API URLs, and it is
     # exactly the shape of the endpoints that matter most for BOLA testing --
     # the plain literal regex above cannot match these at all because of the
-    # `$` and expression characters inside `${...}`. Each `${...}` segment is
-    # replaced with a numeric sentinel so the normal path-templatizing logic
-    # downstream turns it into a proper {paramN} placeholder.
-    _JS_TEMPLATE_LITERAL_RE = re.compile(r"`(/[^`]*?\$\{[^`]*?)`")
+    # `$` and expression characters inside `${...}`. Production bundles very
+    # often prefix the path with an interpolated host/base-URL expression
+    # first, e.g. `${e.hostServer}/rest/basket/${id}`, so the whole backtick
+    # body is captured and the path is located by its first "/" rather than
+    # requiring the literal to start immediately after the backtick. Each
+    # remaining `${...}` segment is replaced with a numeric sentinel so the
+    # normal path-templatizing logic downstream turns it into a proper
+    # {paramN} placeholder.
+    _JS_TEMPLATE_LITERAL_RE = re.compile(r"`([^`]*\$\{[^`]*)`")
     _TEMPLATE_INTERPOLATION_RE = re.compile(r"\$\{[^}]*\}")
 
     # Simple string concatenation, e.g. '/rest/basket/' + id or
@@ -311,9 +316,13 @@ class AutoDiscoverer(Discoverer):
         # interpolation is itself evidence the path addresses a specific
         # object, which is exactly what BOLA testing needs.
         template_confidence = min(1.0, confidence + 0.15)
-        for match in set(self._JS_TEMPLATE_LITERAL_RE.findall(text)):
-            normalized = self._TEMPLATE_INTERPOLATION_RE.sub("1", match)
-            if self._looks_like_api_path(normalized) or "1" in normalized:
+        for backtick_body in set(self._JS_TEMPLATE_LITERAL_RE.findall(text)):
+            slash_index = backtick_body.find("/")
+            if slash_index == -1:
+                continue
+            path_part = backtick_body[slash_index:]
+            normalized = self._TEMPLATE_INTERPOLATION_RE.sub("1", path_part)
+            if self._looks_like_api_path(normalized):
                 absolute = urljoin(base, normalized)
                 self._add_candidate(
                     "GET",
@@ -324,6 +333,8 @@ class AutoDiscoverer(Discoverer):
 
         for prefix in set(self._JS_CONCAT_PREFIX_RE.findall(text)):
             normalized = prefix + "1"
+            if not self._looks_like_api_path(normalized):
+                continue
             absolute = urljoin(base, normalized)
             self._add_candidate(
                 "GET",
