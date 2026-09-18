@@ -82,6 +82,8 @@ class AutoDiscoverer(Discoverer):
         min_confidence: float = 0.35,
         headers: Optional[dict] = None,
         timeout: float = 10.0,
+        max_js_bundles: int = 20,
+        max_js_bundle_bytes: int = 3_000_000,
     ):
         self.start_url = start_url.rstrip("/")
         self.session = session or requests.Session()
@@ -91,9 +93,12 @@ class AutoDiscoverer(Discoverer):
         self.max_depth = max_depth
         self.min_confidence = min_confidence
         self.timeout = timeout
+        self.max_js_bundles = max_js_bundles
+        self.max_js_bundle_bytes = max_js_bundle_bytes
 
         self._origin = self._origin_of(self.start_url)
         self._visited_pages: set[str] = set()
+        self._visited_js_bundles: set[str] = set()
         self._candidates: dict[tuple[str, str], _DiscoveredCandidate] = {}
 
     @staticmethod
@@ -224,24 +229,71 @@ class AutoDiscoverer(Discoverer):
                 form_fields=fields,
             )
 
+    # String-literal path references inside JS source, e.g. fetch("/rest/x")
+    # or axios.get(`/api/y/${id}`). Heuristic only -- does not execute JS, so
+    # paths built up piecemeal via string concatenation are still invisible.
+    _JS_PATH_LITERAL_RE = re.compile(r"""["'`](/[a-zA-Z0-9/_\-{}.]+)["'`]""")
+
     def _extract_js_references(self, soup: BeautifulSoup, base: str) -> None:
-        """Look for fetch()/axios/XHR-style string literals referencing API-shaped
-        paths inside inline <script> blocks. Heuristic only -- does not execute JS.
+        """Scan both inline <script> blocks and same-origin external JS bundles
+        for API-shaped path string literals. Single-page applications (Angular,
+        React, Vue, ...) typically render almost no server-side HTML and issue
+        their real API calls from bundled JS, so external bundles are the
+        primary discovery surface for those apps, not the initial HTML page.
         """
-        pattern = re.compile(r"""["'](/[a-zA-Z0-9/_\-{}.]+)["']""")
         for script in soup.find_all("script"):
-            if script.get("src"):
-                continue  # not fetching and parsing external JS bundles
-            text = script.string or ""
-            for match in pattern.findall(text):
-                if self._looks_like_api_path(match):
-                    absolute = urljoin(base, match)
-                    self._add_candidate(
-                        "GET",
-                        absolute,
-                        confidence=0.3,
-                        signals=["inline-js-reference"],
-                    )
+            src = script.get("src")
+            if src:
+                self._scan_external_js_bundle(urljoin(base, src))
+            else:
+                self._scan_js_text(script.string or "", base)
+
+    def _scan_external_js_bundle(self, bundle_url: str) -> None:
+        if bundle_url in self._visited_js_bundles:
+            return
+        if len(self._visited_js_bundles) >= self.max_js_bundles:
+            return
+        if self._origin_of(bundle_url) != self._origin:
+            return  # never fetch third-party/CDN scripts; out of scope
+        self._visited_js_bundles.add(bundle_url)
+
+        try:
+            resp = self.session.get(
+                bundle_url, timeout=self.timeout, stream=True
+            )
+        except requests.RequestException:
+            return
+        if resp.status_code != 200:
+            return
+
+        content_type = resp.headers.get("content-type", "")
+        if "javascript" not in content_type and not bundle_url.endswith(".js"):
+            return
+
+        chunks = []
+        total = 0
+        for chunk in resp.iter_content(chunk_size=65536, decode_unicode=False):
+            total += len(chunk)
+            if total > self.max_js_bundle_bytes:
+                break
+            chunks.append(chunk)
+        text = b"".join(chunks).decode("utf-8", errors="ignore")
+
+        self._scan_js_text(text, bundle_url, signal="external-js-bundle-reference")
+
+    def _scan_js_text(
+        self, text: str, base: str, signal: str = "inline-js-reference"
+    ) -> None:
+        confidence = 0.3 if signal == "inline-js-reference" else 0.35
+        for match in set(self._JS_PATH_LITERAL_RE.findall(text)):
+            if self._looks_like_api_path(match):
+                absolute = urljoin(base, match)
+                self._add_candidate(
+                    "GET",
+                    absolute,
+                    confidence=confidence,
+                    signals=[signal],
+                )
 
     def _classify_json_response(self, url: str, resp: requests.Response) -> None:
         try:
