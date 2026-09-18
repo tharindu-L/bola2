@@ -59,7 +59,7 @@ def classify_cross_user_access(
     """Apply the deterministic oracle to one cross-user test case and return a
     Finding with an explicit classification, confidence level, and rationale.
     """
-    ownership = ownership_tracker.get(user_a_label, object_identifier)
+    ownership = ownership_tracker.get(user_a_label, operation.operation_id, object_identifier)
     ownership_established = bool(ownership and ownership.is_established)
     ownership_signals = list(ownership.signals) if ownership else []
 
