@@ -34,8 +34,22 @@ class OwnershipRecord:
     established_via_creation: bool = False
     established_via_response_field: bool = False
     score: float = 0.0
+    _contributed_kinds: set = field(default_factory=set, repr=False, compare=False)
 
-    def add_signal(self, description: str, weight: float) -> None:
+    def add_signal(self, kind: str, description: str, weight: float) -> None:
+        """Accumulate one piece of ownership evidence.
+
+        `kind` identifies the *source* of the signal (e.g.
+        "authenticated_listing", or "field_correlation:UserId"). The same
+        weak signal observed twice for the same object -- e.g. the baseline
+        request simply being re-issued, or the same field re-scanned -- must
+        never be allowed to cross the establishment threshold on repetition
+        alone; only genuinely different kinds of evidence combine. A given
+        kind therefore contributes its weight at most once.
+        """
+        if kind in self._contributed_kinds:
+            return
+        self._contributed_kinds.add(kind)
         self.signals.append(description)
         self.score = min(1.0, self.score + weight)
 
@@ -70,7 +84,9 @@ class OwnershipTracker:
         """
         record = self._get_or_create(principal_label, operation_id, object_identifier)
         record.established_via_creation = True
-        record.add_signal("object created by this principal's own authenticated request", 1.0)
+        record.add_signal(
+            "creation", "object created by this principal's own authenticated request", 1.0
+        )
         return record
 
     def record_authenticated_listing(
@@ -81,6 +97,7 @@ class OwnershipTracker:
         record = self._get_or_create(principal_label, operation_id, object_identifier)
         record.established_via_response_field = True
         record.add_signal(
+            "authenticated_listing",
             "object identifier observed in a response returned to this principal's "
             "own authenticated session",
             0.5,
@@ -106,7 +123,9 @@ class OwnershipTracker:
             return None
         record = self._get_or_create(principal_label, operation_id, object_identifier)
         record.add_signal(
-            f"response field '{field_name}' matches principal's known user id", 0.35
+            f"field_correlation:{field_name}",
+            f"response field '{field_name}' matches principal's known user id",
+            0.35,
         )
         return record
 
