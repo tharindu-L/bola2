@@ -93,6 +93,47 @@ def test_template_literal_and_concat_paths_are_discovered():
     assert "/api/users/{param1}" in paths
 
 
+def test_template_literal_with_host_prefix_is_still_discovered():
+    """Reproduces the second live gap: the actual Juice Shop production
+    bundle discovers 55 candidates but none of the per-object endpoints
+    ever get tested, because real minified bundles prefix the template
+    literal with an interpolated host/base-URL expression first, e.g.
+    `${e.hostServer}/rest/basket/${id}` -- which requires "/" to be located
+    anywhere inside the backtick body, not only right after the backtick.
+    """
+    discoverer = AutoDiscoverer(start_url="http://target:3000/", max_pages=5, max_depth=1)
+
+    html_page = _fake_response(
+        status_code=200,
+        headers={"content-type": "text/html"},
+        text='<html><script src="/main.js"></script></html>',
+    )
+    js_bundle = _fake_response(
+        status_code=200,
+        headers={"content-type": "application/javascript"},
+        content=(
+            b"function getBasket(e,t){return http.get(`${e.hostServer}/rest/basket/${t}`)}\n"
+            b"function getUser(e,t){return http.get(`${e.hostServer}/api/users/${t}/profile`)}\n"
+        ),
+    )
+
+    def fake_get(url, timeout=None, stream=False, **kwargs):
+        if url.endswith("/main.js"):
+            return js_bundle
+        return html_page
+
+    discoverer.session.get = MagicMock(side_effect=fake_get)
+    discoverer.session.post = MagicMock(
+        return_value=_fake_response(status_code=404, headers={"content-type": "text/html"})
+    )
+
+    operations = discoverer.discover()
+    paths = {op.path_template for op in operations}
+
+    assert "/rest/basket/{param1}" in paths
+    assert "/api/users/{param1}/profile" in paths
+
+
 def test_off_origin_js_bundle_is_never_fetched():
     discoverer = AutoDiscoverer(start_url="http://target:3000/", max_pages=5, max_depth=1)
 
