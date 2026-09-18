@@ -1,0 +1,42 @@
+# Example scan configuration. Copy this file, fill in real credentials for
+# YOUR authorized test targets, and pass it to `bola-scan --config`.
+#
+# No target-specific detection logic lives here -- this file only supplies
+# where to discover operations and how to log in two test principals.
+
+discovery:
+  # One of: openapi | graphql | auto
+  mode: openapi
+  # OpenAPI: path or URL to the spec document.
+  # GraphQL: the introspection endpoint (or set graphql_endpoint below).
+  # Auto: the start URL to crawl from.
+  source: "./openapi.json"
+  base_url: "http://127.0.0.1:8888"
+  # graphql_endpoint: "http://127.0.0.1:8888/graphql"
+  max_pages: 60
+  max_depth: 3
+  min_confidence: 0.35
+
+timeout: 15
+verify_writes: true
+output_json: "bola_report.json"
+output_markdown: "bola_report.md"
+
+principals:
+  User A:
+    scheme: bearer_token          # bearer_token | cookie | basic | api_key_header
+    login_url: "http://127.0.0.1:8888/api/auth/login"
+    login_payload:
+      email: "user-a@example.test"
+      password: "REPLACE_ME"
+    token_json_path: "token"
+    user_id_hint: "1"             # User A's own known object/account id, if known
+
+  User B:
+    scheme: bearer_token
+    login_url: "http://127.0.0.1:8888/api/auth/login"
+    login_payload:
+      email: "user-b@example.test"
+      password: "REPLACE_ME"
+    token_json_path: "token"
+    user_id_hint: "2"
