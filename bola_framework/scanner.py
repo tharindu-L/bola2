@@ -118,9 +118,11 @@ class Scanner:
             # Can't establish a legitimate baseline for this identifier; skip.
             return None
 
-        self.ownership_tracker.record_authenticated_listing(user_a.label, object_id)
+        self.ownership_tracker.record_authenticated_listing(
+            user_a.label, operation.operation_id, object_id
+        )
         self.ownership_tracker.scan_response_for_correlations(
-            user_a.label, object_id, baseline.response_body, user_a.user_id_hint
+            user_a.label, operation.operation_id, object_id, baseline.response_body, user_a.user_id_hint
         )
 
         # Step 2: User B attempts the same operation against the same identifier.
