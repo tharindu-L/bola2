@@ -255,6 +255,41 @@ class AutoDiscoverer(Discoverer):
         r"""["'](/[a-zA-Z0-9/_\-]*/)["']\s*\+\s*[a-zA-Z_$][\w$]*"""
     )
 
+    # The same concatenation shape but relative (no leading "/"), because it
+    # is itself preceded by a base-URL variable, e.g.
+    # `apiUrl + "api/Users/" + id` or `this.hostServer + 'Addresss/' + id`.
+    # This is a very common pattern in SPA services that keep a base URL in
+    # a config/environment variable and append the resource path. Captured
+    # separately (rather than folding "/" into the character class of the
+    # existing pattern) so the prefix can be normalized with a leading "/"
+    # before being run through the same path-shape classifier.
+    _JS_CONCAT_RELATIVE_PREFIX_RE = re.compile(
+        r"""[a-zA-Z_$][\w$]*\s*\+\s*["']([a-zA-Z][a-zA-Z0-9/_\-]*/)["']\s*\+\s*[a-zA-Z_$][\w$]*"""
+    )
+
+    # Generic inference of the HTTP verb an API path literal was used with,
+    # from the calling convention immediately preceding it in the source
+    # (e.g. `http.put(`, `axios.delete(`, `.patch(`). Structural, not tied to
+    # any specific application or library -- these are the standard method
+    # names shared by every common JS HTTP client (fetch wrappers, axios,
+    # Angular HttpClient, jQuery.ajax). Falls back to GET when no such call
+    # site is recognizable, since GET is the safe default for a bare
+    # reference. Without this, every JS-discovered candidate was hardcoded
+    # to GET, so mutating BOLA operations (PUT/DELETE update-another-user's-
+    # object cases) were never even attempted.
+    _JS_METHOD_CALL_RE = re.compile(
+        r"\.(get|post|put|patch|delete)\s*\(\s*$", re.IGNORECASE
+    )
+    _JS_METHOD_LOOKBEHIND_WINDOW = 40
+
+    def _infer_js_method(self, text: str, match_start: int) -> str:
+        window_start = max(0, match_start - self._JS_METHOD_LOOKBEHIND_WINDOW)
+        window = text[window_start:match_start]
+        call = self._JS_METHOD_CALL_RE.search(window)
+        if call:
+            return call.group(1).upper()
+        return "GET"
+
     def _extract_js_references(self, soup: BeautifulSoup, base: str) -> None:
         """Scan both inline <script> blocks and same-origin external JS bundles
         for API-shaped path string literals. Single-page applications (Angular,
@@ -307,41 +342,63 @@ class AutoDiscoverer(Discoverer):
     ) -> None:
         confidence = 0.3 if signal == "inline-js-reference" else 0.35
 
-        for match in set(self._JS_PATH_LITERAL_RE.findall(text)):
-            if self._looks_like_api_path(match):
-                absolute = urljoin(base, match)
-                self._add_candidate("GET", absolute, confidence=confidence, signals=[signal])
+        seen_literals: set[tuple[str, str]] = set()
+        for match in self._JS_PATH_LITERAL_RE.finditer(text):
+            path = match.group(1)
+            if not self._looks_like_api_path(path):
+                continue
+            method = self._infer_js_method(text, match.start())
+            if (method, path) in seen_literals:
+                continue
+            seen_literals.add((method, path))
+            absolute = urljoin(base, path)
+            self._add_candidate(method, absolute, confidence=confidence, signals=[signal])
 
         # Template-literal paths carry a stronger signal than plain literals:
         # interpolation is itself evidence the path addresses a specific
         # object, which is exactly what BOLA testing needs.
         template_confidence = min(1.0, confidence + 0.15)
-        for backtick_body in set(self._JS_TEMPLATE_LITERAL_RE.findall(text)):
+        seen_templates: set[tuple[str, str]] = set()
+        for match in self._JS_TEMPLATE_LITERAL_RE.finditer(text):
+            backtick_body = match.group(1)
             slash_index = backtick_body.find("/")
             if slash_index == -1:
                 continue
             path_part = backtick_body[slash_index:]
             normalized = self._TEMPLATE_INTERPOLATION_RE.sub("1", path_part)
-            if self._looks_like_api_path(normalized):
-                absolute = urljoin(base, normalized)
-                self._add_candidate(
-                    "GET",
-                    absolute,
-                    confidence=template_confidence,
-                    signals=[f"{signal}-template-literal"],
-                )
-
-        for prefix in set(self._JS_CONCAT_PREFIX_RE.findall(text)):
-            normalized = prefix + "1"
             if not self._looks_like_api_path(normalized):
                 continue
+            method = self._infer_js_method(text, match.start())
+            if (method, normalized) in seen_templates:
+                continue
+            seen_templates.add((method, normalized))
             absolute = urljoin(base, normalized)
             self._add_candidate(
-                "GET",
+                method,
                 absolute,
                 confidence=template_confidence,
-                signals=[f"{signal}-string-concat"],
+                signals=[f"{signal}-template-literal"],
             )
+
+        seen_concat: set[tuple[str, str]] = set()
+        for pattern in (self._JS_CONCAT_PREFIX_RE, self._JS_CONCAT_RELATIVE_PREFIX_RE):
+            for match in pattern.finditer(text):
+                prefix = match.group(1)
+                normalized = prefix if prefix.startswith("/") else "/" + prefix
+                normalized = normalized + "1"
+                if not self._looks_like_api_path(normalized):
+                    continue
+                method = self._infer_js_method(text, match.start())
+                if (method, normalized) in seen_concat:
+                    continue
+                seen_concat.add((method, normalized))
+                absolute = urljoin(base, normalized)
+                self._add_candidate(
+                    method,
+                    absolute,
+                    confidence=template_confidence,
+                    signals=[f"{signal}-string-concat"],
+                )
 
     def _classify_json_response(self, url: str, resp: requests.Response) -> None:
         try:
